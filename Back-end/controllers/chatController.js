@@ -1,5 +1,8 @@
 import Chat from '../models/chatSchema.js';
 import Message from '../models/messageSchema.js';
+import RepairRequest from '../models/repairRequestSchema.js';
+import Bid from '../models/bidSchema.js';
+import { apiResponse } from '../utils/apiResponse.js';
 
 export const createChat = async (req, res) => {
   try {
@@ -17,7 +20,11 @@ export const createChat = async (req, res) => {
     }
 
     // Check if chat already exists
-    const existingChat = await Chat.findOne({ repairRequestId, bidId });
+    const existingChat = await Chat.findOne({ repairRequestId, bidId })
+      .populate('participants.userId', 'name email profileImage')
+      .populate('repairRequestId', 'title status')
+      .populate('bidId', 'amount status');
+
     if (existingChat) {
       return apiResponse(res, {
         statusCode: 200,
@@ -37,7 +44,11 @@ export const createChat = async (req, res) => {
       isActive: true
     });
 
-    await chat.populate('participants.userId', 'name email profileImage');
+    await chat.populate([
+      { path: 'participants.userId', select: 'name email profileImage' },
+      { path: 'repairRequestId', select: 'title status' },
+      { path: 'bidId', select: 'amount status' }
+    ]);
 
     return apiResponse(res, {
       statusCode: 201,
@@ -60,13 +71,38 @@ export const getUserChats = async (req, res) => {
       isActive: true
     })
     .populate('participants.userId', 'name email profileImage')
-    .populate('repairRequestId', 'title status')
+    .populate('repairRequestId', 'title status deviceInfo')
+    .populate('bidId', 'amount status')
+    .populate({
+      path: 'participants.userId',
+      populate: {
+        path: 'technicianProfile',
+        model: 'TechnicianProfile',
+        select: 'rating specializations'
+      }
+    })
     .sort({ 'lastMessage.timestamp': -1 });
+
+    // Get unread message count for each chat
+    const chatsWithUnreadCount = await Promise.all(
+      chats.map(async (chat) => {
+        const unreadCount = await Message.countDocuments({
+          chatId: chat._id,
+          senderId: { $ne: req.user._id },
+          isRead: false
+        });
+        
+        return {
+          ...chat.toObject(),
+          unreadCount
+        };
+      })
+    );
 
     return apiResponse(res, {
       statusCode: 200,
       message: 'Chats retrieved successfully',
-      data: chats
+      data: chatsWithUnreadCount
     });
   } catch (error) {
     return apiResponse(res, {
@@ -82,7 +118,9 @@ export const sendMessage = async (req, res) => {
     const { chatId } = req.params;
     const { content, messageType = 'text', attachments = [] } = req.body;
     
-    const chat = await Chat.findById(chatId);
+    const chat = await Chat.findById(chatId)
+      .populate('participants.userId', 'name profileImage');
+    
     if (!chat) {
       return apiResponse(res, {
         statusCode: 404,
@@ -92,7 +130,7 @@ export const sendMessage = async (req, res) => {
 
     // Check if user is participant
     const isParticipant = chat.participants.some(
-      p => p.userId.toString() === req.user._id.toString()
+      p => p.userId._id.toString() === req.user._id.toString()
     );
     
     if (!isParticipant) {
@@ -120,6 +158,25 @@ export const sendMessage = async (req, res) => {
     });
 
     await message.populate('senderId', 'name profileImage');
+
+    // Get the recipient for real-time messaging
+    const recipient = chat.participants.find(
+      p => p.userId._id.toString() !== req.user._id.toString()
+    );
+
+    // Emit real-time message
+    const io = req.app.get('io');
+    if (io && recipient) {
+      io.to(`user_${recipient.userId._id}`).emit('new_message', {
+        chatId,
+        message,
+        sender: {
+          _id: req.user._id,
+          name: req.user.name,
+          profileImage: req.user.profileImage
+        }
+      });
+    }
 
     return apiResponse(res, {
       statusCode: 201,
@@ -181,6 +238,56 @@ export const getChatMessages = async (req, res) => {
     return apiResponse(res, {
       statusCode: 500,
       message: 'Error fetching messages',
+      error: error.message
+    });
+  }
+};
+
+export const getChatById = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    
+    const chat = await Chat.findById(chatId)
+      .populate('participants.userId', 'name email profileImage')
+      .populate('repairRequestId', 'title description status deviceInfo')
+      .populate('bidId', 'amount status estimatedTime description warranty')
+      .populate({
+        path: 'participants.userId',
+        populate: {
+          path: 'technicianProfile',
+          model: 'TechnicianProfile',
+          select: 'rating experience specializations bio'
+        }
+      });
+
+    if (!chat) {
+      return apiResponse(res, {
+        statusCode: 404,
+        message: 'Chat not found'
+      });
+    }
+
+    // Check if user is participant
+    const isParticipant = chat.participants.some(
+      p => p.userId._id.toString() === req.user._id.toString()
+    );
+    
+    if (!isParticipant) {
+      return apiResponse(res, {
+        statusCode: 403,
+        message: 'Not authorized to view this chat'
+      });
+    }
+
+    return apiResponse(res, {
+      statusCode: 200,
+      message: 'Chat retrieved successfully',
+      data: chat
+    });
+  } catch (error) {
+    return apiResponse(res, {
+      statusCode: 500,
+      message: 'Error fetching chat',
       error: error.message
     });
   }

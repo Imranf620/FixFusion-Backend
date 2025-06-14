@@ -2,6 +2,9 @@ import RepairRequest from '../models/repairRequestSchema.js';
 import { apiResponse } from '../utils/apiResponse.js';
 import TechnicianProfile from '../models/technicianSchema.js';
 import { uploadRepairImages } from '../utils/uploadRepairImages.js';
+import User from '../models/userSchema.js';
+import { sendPushNotification } from '../utils/sendPushNotification.js';
+
 
 export const createRepairRequest = [
   uploadRepairImages.array('images', 5),
@@ -17,16 +20,9 @@ export const createRepairRequest = [
         location,
       } = req.body;
 
-      // Safe JSON parsing (in case it's already parsed)
-      if (typeof deviceInfo === 'string') {
-        deviceInfo = JSON.parse(deviceInfo);
-      }
-      if (typeof preferredBudget === 'string') {
-        preferredBudget = JSON.parse(preferredBudget);
-      }
-      if (typeof location === 'string') {
-        location = JSON.parse(location);
-      }
+      if (typeof deviceInfo === 'string') deviceInfo = JSON.parse(deviceInfo);
+      if (typeof preferredBudget === 'string') preferredBudget = JSON.parse(preferredBudget);
+      if (typeof location === 'string') location = JSON.parse(location);
 
       const imageDocs = req.files?.map(file => ({
         url: `/uploads/repairImages/${file.filename}`,
@@ -45,13 +41,25 @@ export const createRepairRequest = [
         location,
         status: 'open',
       });
-      
 
       await repairRequest.populate('customerId', 'name email phone');
 
+      // 🔔 Send Push Notifications to all Technicians
+      const technicians = await TechnicianProfile.find({}, 'userId');
+      const userIds = technicians.map(t => t.userId);
+      const users = await User.find({ _id: { $in: userIds }, expoPushToken: { $exists: true, $ne: null } });
+
+      for (const tech of users) {
+        await sendPushNotification(
+          tech.expoPushToken,
+          '🛠️ New Repair Request Available',
+          `${repairRequest.title} - ${repairRequest.description}`
+        );
+      }
+
       return apiResponse(res, {
         statusCode: 201,
-        message: 'Repair request created successfully',
+        message: 'Repair request created and notifications sent successfully',
         data: repairRequest
       });
     } catch (error) {

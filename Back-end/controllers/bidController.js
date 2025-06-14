@@ -1,6 +1,10 @@
 import Bid from '../models/bidSchema.js';
 import RepairRequest from '../models/repairRequestSchema.js';
-import Notification from '../models/notificationSchema.js'
+import Notification from '../models/notificationSchema.js';
+import TechnicianProfile from '../models/technicianSchema.js';
+import User from '../models/userSchema.js';
+import { apiResponse } from '../utils/apiResponse.js';
+import { sendPushNotification } from '../utils/sendPushNotification.js';
 
 export const createBid = async (req, res) => {
   try {
@@ -15,7 +19,9 @@ export const createBid = async (req, res) => {
     }
 
     // Check if repair request exists and is open
-    const repairRequest = await RepairRequest.findById(repairRequestId);
+    const repairRequest = await RepairRequest.findById(repairRequestId)
+      .populate('customerId', 'name email expoPushToken');
+    
     if (!repairRequest) {
       return apiResponse(res, {
         statusCode: 404,
@@ -60,17 +66,48 @@ export const createBid = async (req, res) => {
 
     // Create notification for customer
     await Notification.create({
-      userId: repairRequest.customerId,
+      userId: repairRequest.customerId._id,
       type: 'new_bid',
       title: 'New Bid Received',
-      message: `You received a new bid of PKR ${amount} for your repair request`,
+      message: `You received a new bid of PKR ${amount} for your repair request "${repairRequest.title}"`,
       data: {
         repairRequestId,
         bidId: bid._id
       }
     });
 
-    await bid.populate('technicianId', 'name email phone');
+    // Send push notification to customer
+    if (repairRequest.customerId.expoPushToken) {
+      await sendPushNotification(
+        repairRequest.customerId.expoPushToken,
+        '💰 New Bid Received',
+        `PKR ${amount} for "${repairRequest.title}"`
+      );
+    }
+
+    await bid.populate([
+      { path: 'technicianId', select: 'name email phone profileImage' },
+      { 
+        path: 'technicianId',
+        populate: {
+          path: 'technicianProfile',
+          model: 'TechnicianProfile',
+          select: 'rating experience specializations serviceRadius'
+        }
+      }
+    ]);
+
+    // Emit real-time notification to customer
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`user_${repairRequest.customerId._id}`).emit('new_bid', {
+        bid,
+        repairRequest: {
+          id: repairRequest._id,
+          title: repairRequest.title
+        }
+      });
+    }
 
     return apiResponse(res, {
       statusCode: 201,
@@ -118,7 +155,7 @@ export const getBidsForRepairRequest = async (req, res) => {
         populate: {
           path: 'technicianProfile',
           model: 'TechnicianProfile',
-          select: 'rating experience specializations'
+          select: 'rating experience specializations serviceRadius bio'
         }
       })
       .sort(sortOptions);
@@ -145,7 +182,7 @@ export const getTechnicianBids = async (req, res) => {
     if (status) filter.status = status;
 
     const bids = await Bid.find(filter)
-      .populate('repairRequestId', 'title description deviceInfo status location')
+      .populate('repairRequestId', 'title description deviceInfo status location urgency')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
@@ -174,11 +211,64 @@ export const getTechnicianBids = async (req, res) => {
   }
 };
 
+export const getCustomerBids = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 10 } = req.query;
+    
+    // Get all repair requests for this customer
+    const repairRequests = await RepairRequest.find({ customerId: req.user._id });
+    const repairRequestIds = repairRequests.map(req => req._id);
+    
+    const filter = { repairRequestId: { $in: repairRequestIds } };
+    if (status) filter.status = status;
+
+    const bids = await Bid.find(filter)
+      .populate('technicianId', 'name email phone profileImage')
+      .populate({
+        path: 'technicianId',
+        populate: {
+          path: 'technicianProfile',
+          model: 'TechnicianProfile',
+          select: 'rating experience specializations'
+        }
+      })
+      .populate('repairRequestId', 'title description deviceInfo status')
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    const total = await Bid.countDocuments(filter);
+
+    return apiResponse(res, {
+      statusCode: 200,
+      message: 'Bids for your requests retrieved successfully',
+      data: {
+        bids,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+  } catch (error) {
+    console.log('error',error)
+    return apiResponse(res, {
+      statusCode: 500,
+      message: 'Error fetching bids',
+      error: error.message
+    });
+  }
+};
+
 export const acceptBid = async (req, res) => {
   try {
     const { bidId } = req.params;
     
-    const bid = await Bid.findById(bidId).populate('repairRequestId technicianId');
+    const bid = await Bid.findById(bidId)
+      .populate('repairRequestId')
+      .populate('technicianId', 'name email expoPushToken');
     
     if (!bid) {
       return apiResponse(res, {
@@ -232,12 +322,30 @@ export const acceptBid = async (req, res) => {
       userId: bid.technicianId._id,
       type: 'bid_accepted',
       title: 'Bid Accepted!',
-      message: `Your bid of PKR ${bid.amount} has been accepted`,
+      message: `Your bid of PKR ${bid.amount} has been accepted for "${bid.repairRequestId.title}"`,
       data: {
         repairRequestId: bid.repairRequestId._id,
         bidId: bid._id
       }
     });
+
+    // Send push notification to technician
+    if (bid.technicianId.expoPushToken) {
+      await sendPushNotification(
+        bid.technicianId.expoPushToken,
+        '🎉 Bid Accepted!',
+        `Your bid of PKR ${bid.amount} has been accepted`
+      );
+    }
+
+    // Emit real-time notification
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`user_${bid.technicianId._id}`).emit('bid_accepted', {
+        bid,
+        repairRequest: bid.repairRequestId
+      });
+    }
 
     return apiResponse(res, {
       statusCode: 200,
@@ -256,8 +364,11 @@ export const acceptBid = async (req, res) => {
 export const rejectBid = async (req, res) => {
   try {
     const { bidId } = req.params;
+    const { reason } = req.body;
     
-    const bid = await Bid.findById(bidId).populate('repairRequestId technicianId');
+    const bid = await Bid.findById(bidId)
+      .populate('repairRequestId')
+      .populate('technicianId', 'name email expoPushToken');
     
     if (!bid) {
       return apiResponse(res, {
@@ -284,6 +395,7 @@ export const rejectBid = async (req, res) => {
     // Update bid status
     bid.status = 'rejected';
     bid.rejectedAt = new Date();
+    bid.rejectionReason = reason;
     await bid.save();
 
     // Create notification for technician
@@ -291,12 +403,32 @@ export const rejectBid = async (req, res) => {
       userId: bid.technicianId._id,
       type: 'bid_rejected',
       title: 'Bid Rejected',
-      message: `Your bid of PKR ${bid.amount} has been rejected`,
+      message: `Your bid of PKR ${bid.amount} has been rejected for "${bid.repairRequestId.title}"`,
       data: {
         repairRequestId: bid.repairRequestId._id,
-        bidId: bid._id
+        bidId: bid._id,
+        reason
       }
     });
+
+    // Send push notification to technician
+    if (bid.technicianId.expoPushToken) {
+      await sendPushNotification(
+        bid.technicianId.expoPushToken,
+        '❌ Bid Rejected',
+        `Your bid of PKR ${bid.amount} has been rejected`
+      );
+    }
+
+    // Emit real-time notification
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`user_${bid.technicianId._id}`).emit('bid_rejected', {
+        bid,
+        repairRequest: bid.repairRequestId,
+        reason
+      });
+    }
 
     return apiResponse(res, {
       statusCode: 200,
