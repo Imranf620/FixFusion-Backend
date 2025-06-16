@@ -13,6 +13,7 @@ import notificationRoutes from './routes/notificationRoutes.js';
 import repairRequestRoutes from './routes/repairRequestRoutes.js';
 import reviewRoutes from './routes/reviewRoutes.js';
 import technicianRoutes from './routes/technicianRoutes.js';
+import transactionRoutes from './routes/transactionRoutes.js';
 import User from './models/userSchema.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -53,7 +54,7 @@ const authenticateSocket = async (socket, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.userId).select('-password');
+    const user = await User.findById(decoded.id).select('-password');
     
     if (!user) {
       return next(new Error('User not found'));
@@ -135,6 +136,8 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/repair-requests', repairRequestRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/technicians', technicianRoutes);
+app.use('/api/transactions', transactionRoutes);
+
 
 app.use(errorMiddleware);
 

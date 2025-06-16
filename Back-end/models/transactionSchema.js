@@ -28,7 +28,6 @@ const transactionSchema = new mongoose.Schema({
     type: {
       type: String,
       enum: ['repair_payment', 'subscription_fee', 'refund'],
-      required: true
     },
     status: {
       type: String,

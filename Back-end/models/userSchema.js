@@ -101,6 +101,14 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
+userSchema.virtual('technicianProfile', {
+  ref: 'TechnicianProfile',
+  localField: '_id',
+  foreignField: 'userId',
+  justOne: true
+});
+
+
 const User = mongoose.model('User', userSchema);
 
 export default User

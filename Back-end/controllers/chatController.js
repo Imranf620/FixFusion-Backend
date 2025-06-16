@@ -235,6 +235,7 @@ export const getChatMessages = async (req, res) => {
       data: messages.reverse() // Reverse to show oldest first
     });
   } catch (error) {
+    console.log('err', error)
     return apiResponse(res, {
       statusCode: 500,
       message: 'Error fetching messages',

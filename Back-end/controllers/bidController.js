@@ -6,9 +6,69 @@ import User from '../models/userSchema.js';
 import { apiResponse } from '../utils/apiResponse.js';
 import { sendPushNotification } from '../utils/sendPushNotification.js';
 
+// Helper function to parse estimated time string
+const parseEstimatedTime = (timeString) => {
+  if (!timeString) {
+    throw new Error('Estimated time is required');
+  }
+
+  const timeStr = timeString.toLowerCase().trim();
+  
+  // Parse different time formats
+  if (timeStr === 'same day') {
+    return { value: 8, unit: 'hours' }; // Assuming same day = 8 hours
+  }
+  
+  if (timeStr.includes('hour')) {
+    const match = timeStr.match(/(\d+)/);
+    if (match) {
+      return { value: parseInt(match[1]), unit: 'hours' };
+    }
+  }
+  
+  if (timeStr.includes('day')) {
+    // Handle ranges like "1-2 days", "2-3 days"
+    const rangeMatch = timeStr.match(/(\d+)-(\d+)\s*days?/);
+    if (rangeMatch) {
+      // Take the average of the range
+      const min = parseInt(rangeMatch[1]);
+      const max = parseInt(rangeMatch[2]);
+      return { value: Math.ceil((min + max) / 2), unit: 'days' };
+    }
+    
+    // Handle single numbers like "3 days", "5 days"
+    const singleMatch = timeStr.match(/(\d+)\s*days?/);
+    if (singleMatch) {
+      return { value: parseInt(singleMatch[1]), unit: 'days' };
+    }
+  }
+  
+  if (timeStr.includes('week')) {
+    // Handle ranges like "3-4 weeks"
+    const rangeMatch = timeStr.match(/(\d+)-(\d+)\s*weeks?/);
+    if (rangeMatch) {
+      const min = parseInt(rangeMatch[1]);
+      const max = parseInt(rangeMatch[2]);
+      const avgWeeks = Math.ceil((min + max) / 2);
+      return { value: avgWeeks * 7, unit: 'days' }; // Convert weeks to days
+    }
+    
+    // Handle single numbers like "1 week", "2 weeks"
+    const singleMatch = timeStr.match(/(\d+)\s*weeks?/);
+    if (singleMatch) {
+      const weeks = parseInt(singleMatch[1]);
+      return { value: weeks * 7, unit: 'days' }; // Convert weeks to days
+    }
+  }
+  
+  // Default fallback
+  throw new Error('Invalid estimated time format');
+};
+
 export const createBid = async (req, res) => {
   try {
     const { repairRequestId, amount, estimatedTime, description, partsIncluded, warranty, message } = req.body;
+    console.log('Original estimated time:', estimatedTime);
     
     // Check if technician role
     if (req.user.role !== 'technician') {
@@ -49,11 +109,23 @@ export const createBid = async (req, res) => {
       });
     }
 
+    // Parse estimated time from string to object
+    let parsedEstimatedTime;
+    try {
+      parsedEstimatedTime = parseEstimatedTime(estimatedTime);
+      console.log('Parsed estimated time:', parsedEstimatedTime);
+    } catch (error) {
+      return apiResponse(res, {
+        statusCode: 400,
+        message: 'Invalid estimated time format'
+      });
+    }
+
     const bid = await Bid.create({
       repairRequestId,
       technicianId: req.user._id,
       amount,
-      estimatedTime,
+      estimatedTime: parsedEstimatedTime, // Use parsed object instead of string
       description,
       partsIncluded: partsIncluded || [],
       warranty,
@@ -115,6 +187,7 @@ export const createBid = async (req, res) => {
       data: bid
     });
   } catch (error) {
+    console.log("error", error)
     return apiResponse(res, {
       statusCode: 500,
       message: 'Error creating bid',
